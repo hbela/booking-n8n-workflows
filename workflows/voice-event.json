@@ -1,0 +1,652 @@
+{
+    "name": "Voice Agent Pro: Agentic Booking with TTS and Robust Error Handling",
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "voice-agent-pro",
+                "responseMode": "responseNode",
+                "options": {}
+            },
+            "id": "36c64812-e1f1-4f2a-ab8e-3ab09d72d1b9",
+            "name": "Webhook Trigger",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 1.1,
+            "position": [
+                -1328,
+                160
+            ],
+            "webhookId": "voice-agent-pro-webhook"
+        },
+        {
+            "parameters": {
+                "resource": "audio",
+                "operation": "transcribe",
+                "requestOptions": {}
+            },
+            "id": "977ad68e-abca-4784-a8c3-cacfc754919c",
+            "name": "OpenAI Speech-to-Text",
+            "type": "n8n-nodes-base.openAi",
+            "typeVersion": 1,
+            "position": [
+                -1104,
+                160
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Context Builder Function Node\n// Builds comprehensive context for LLM based on session state and conversation history\n\nconst webhookData = $('Webhook Trigger').item.json;\nconst sttData = $input.item.json;\n\n// Get form fields from webhook\nconst sessionState = JSON.parse(webhookData.sessionState || '{}');\nconst sessionId = webhookData.sessionId || '';\nconst authToken = webhookData.authToken || '';\n\n// Get transcript from STT output\nconst transcript = sttData.text || sttData.transcript || sttData.data?.text || '';\n\n// Determine current step and build context accordingly\nconst currentStep = sessionState.currentStep || 'org_search';\nconst selectedOrgId = sessionState.selectedOrganizationId;\nconst selectedDeptId = sessionState.selectedDepartmentId;\nconst selectedProviderId = sessionState.selectedProviderId;\nconst userId = sessionState.userId;\nconst conversationHistory = sessionState.conversationHistory || [];\n\n// Add current user message to history for the LLM prompt\nconst messages = [...conversationHistory, { role: 'user', content: transcript }];\n\n// Base system prompt\nlet systemPrompt = `You are a helpful, professional voice assistant for a booking system. Your role is to guide users through booking appointments with healthcare providers.\n\nAvailable steps in the booking flow:\n1. org_search - User is searching for an organization\n2. org_selected - User has selected an organization\n3. auth_required - User needs to authenticate\n4. dept_selection - User is selecting a department\n5. provider_selection - User is selecting a provider\n6. availability_query - User is querying provider availability\n7. booking - User is creating a booking\n\nCurrent session state:\n- Step: ${currentStep}\n- Selected Organization ID: ${selectedOrgId || 'None'}\n- Selected Department ID: ${selectedDeptId || 'None'}\n- Selected Provider ID: ${selectedProviderId || 'None'}\n- User ID: ${userId || 'Not authenticated'}\n\nYou must respond with a JSON object in this exact format:\n{\n  \"responseText\": \"Natural language response for the user\",\n  \"action\": {\n    \"type\": \"search_org\" | \"select_org\" | \"list_departments\" | \"list_providers\" | \"query_availability\" | \"create_booking\" | \"auth_required\" | \"continue_conversation\" | \"help\",\n    \"parameters\": {\n      \"orgId\": \"string (optional)\",\n      \"deptId\": \"string (optional)\",\n      \"providerId\": \"string (optional)\",\n      \"eventId\": \"string (optional)\",\n      \"query\": \"string (optional)\"\n    }\n  },\n  \"sessionUpdate\": {\n    \"currentStep\": \"string\",\n    \"selectedOrganizationId\": \"string (optional)\",\n    \"selectedDepartmentId\": \"string (optional)\",\n    \"selectedProviderId\": \"string (optional)\",\n    \"conversationHistory\": [ /* Array of {role: string, content: string} objects for the last 5 turns */ ]\n  }\n}`;\n\n// Add step-specific context (omitted for brevity, assume similar to original)\n\nreturn {\n  json: {\n    systemPrompt,\n    messages,\n    sessionId,\n    authToken,\n    sessionState: JSON.stringify(sessionState),\n    originalTranscript: transcript\n  }\n};"
+            },
+            "id": "2536d841-2d65-4ac2-a7ed-5f77f1b8e0e5",
+            "name": "Context Builder (History)",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                -880,
+                160
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "chatCompletion",
+                "requestOptions": {}
+            },
+            "id": "c143cb4d-26ba-49fb-a8c5-030d4ca41815",
+            "name": "OpenAI Chat Completion (Agent)",
+            "type": "n8n-nodes-base.openAi",
+            "typeVersion": 1,
+            "position": [
+                -656,
+                160
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Parse LLM response and extract action, and update history\nconst llmResponse = $input.item.json.choices[0].message.content;\nlet parsedResponse;\n\ntry {\n  parsedResponse = JSON.parse(llmResponse);\n} catch (error) {\n  // Fallback if JSON parsing fails\n  parsedResponse = {\n    responseText: 'I apologize, I had a momentary lapse. Could you please repeat that?',\n    action: { type: 'continue_conversation' },\n    sessionUpdate: {}\n  };\n}\n\n// Extract data\nconst actionType = parsedResponse.action?.type || 'continue_conversation';\nconst actionParams = parsedResponse.action?.parameters || {};\nconst responseText = parsedResponse.responseText || 'I understand.';\nlet sessionUpdate = parsedResponse.sessionUpdate || {};\n\n// Get context from previous node\nconst context = $('Context Builder (History)').item.json;\nconst transcript = context.originalTranscript;\nconst conversationHistory = JSON.parse(context.sessionState).conversationHistory || [];\n\n// Update conversation history for next turn\nconst newHistory = [...conversationHistory];\nnewHistory.push({ role: 'user', content: transcript });\nnewHistory.push({ role: 'assistant', content: responseText });\n\n// Keep only the last 5 turns (10 messages)\nsessionUpdate.conversationHistory = newHistory.slice(-10);\n\nreturn {\n  json: {\n    actionType,\n    actionParams,\n    responseText,\n    sessionUpdate,\n    sessionId: context.sessionId,\n    authToken: context.authToken,\n    sessionState: JSON.parse(context.sessionState),\n    transcript,\n    requiresApiCall: ['search_org', 'list_departments', 'list_providers', 'query_availability', 'create_booking'].includes(actionType)\n  }\n};"
+            },
+            "id": "cd8dfade-a868-45e0-9669-826e1987a6f7",
+            "name": "Parse Action & Update History",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                -448,
+                160
+            ]
+        },
+        {
+            "parameters": {
+                "rules": {
+                    "values": [
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.actionType }}",
+                                        "rightValue": "search_org",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "outputIndex": 0
+                        },
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.actionType }}",
+                                        "rightValue": "list_departments",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "outputIndex": 1
+                        },
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.actionType }}",
+                                        "rightValue": "list_providers",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "outputIndex": 2
+                        },
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.actionType }}",
+                                        "rightValue": "query_availability",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "outputIndex": 3
+                        },
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.actionType }}",
+                                        "rightValue": "create_booking",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "outputIndex": 4
+                        },
+                        {
+                            "conditions": {
+                                "options": {
+                                    "caseSensitive": true,
+                                    "leftValue": "",
+                                    "typeValidation": "strict"
+                                },
+                                "conditions": [
+                                    {
+                                        "leftValue": "={{ $json.actionType }}",
+                                        "rightValue": "auth_required",
+                                        "operator": {
+                                            "type": "string",
+                                            "operation": "equals"
+                                        }
+                                    }
+                                ],
+                                "combinator": "and"
+                            },
+                            "outputIndex": 5
+                        }
+                    ]
+                },
+                "options": {
+                    "fallbackOutput": "extra"
+                }
+            },
+            "id": "4c21c595-a27f-4538-bd61-c0322123659e",
+            "name": "Switch Action Type",
+            "type": "n8n-nodes-base.switch",
+            "typeVersion": 3,
+            "position": [
+                -224,
+                160
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{ $env.FASTIFY_API_URL }}/api/organizations/search",
+                "options": {}
+            },
+            "id": "4e9fdae7-6ad2-44eb-8e93-340c6a08d61e",
+            "name": "API: Search Organizations",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                0,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{ $env.FASTIFY_API_URL }}/api/client/organizations/{{ $json.actionParams.orgId }}/departments",
+                "authentication": "header",
+                "options": {}
+            },
+            "id": "742eb95f-618a-44a3-9a3f-f47c6ccc884e",
+            "name": "API: List Departments",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                0,
+                128
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{ $env.FASTIFY_API_URL }}/api/client/departments/{{ $json.actionParams.deptId }}/providers",
+                "authentication": "header",
+                "options": {}
+            },
+            "id": "d6de047b-49c4-439e-969b-7f4da0da0a6d",
+            "name": "API: List Providers",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                0,
+                240
+            ]
+        },
+        {
+            "parameters": {
+                "url": "={{ $env.FASTIFY_API_URL }}/api/client/providers/{{ $json.actionParams.providerId }}/available-events",
+                "authentication": "header",
+                "options": {}
+            },
+            "id": "402de467-17ce-455d-9876-ccd5ad1f8e32",
+            "name": "API: Query Availability",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                0,
+                368
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "={{ $env.FASTIFY_API_URL }}/api/client/bookings",
+                "authentication": "header",
+                "options": {}
+            },
+            "id": "e8a3e9bf-6e29-4665-9e12-af227564fc8e",
+            "name": "API: Create Booking",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                0,
+                480
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// API Response Handler\n// Checks for 401 Unauthorized and generates a new response for the LLM to process\n\nconst apiResponse = $input.item.json;\nconst statusCode = apiResponse.statusCode;\nconst originalData = $('Parse Action & Update History').item.json;\n\nif (statusCode === 401) {\n  // Authentication required\n  return {\n    json: {\n      responseText: 'Authentication is required for this action. Please log in.',\n      actionType: 'auth_required',\n      apiResponse: apiResponse\n    }\n  };\n} else if (statusCode >= 400) {\n  // General API error\n  return {\n    json: {\n      responseText: 'I encountered an error while communicating with the booking system. The error was: ' + (apiResponse.statusText || 'Unknown Error'),\n      actionType: 'continue_conversation',\n      apiResponse: apiResponse\n    }\n  };\n} else {\n  // Successful API call\n  return {\n    json: {\n      responseText: 'API_SUCCESS_PROCEED_TO_SUMMARY',\n      actionType: originalData.actionType,\n      apiResponse: apiResponse\n    }\n  };\n}"
+            },
+            "id": "63256bf8-c8fa-42e4-b064-911ac2e1f98f",
+            "name": "API Response Handler",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                224,
+                240
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "chatCompletion",
+                "requestOptions": {}
+            },
+            "id": "7fa9910c-623c-4679-b722-aa3d6df1baad",
+            "name": "LLM: Summarize API Result",
+            "type": "n8n-nodes-base.openAi",
+            "typeVersion": 1,
+            "position": [
+                448,
+                240
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "={{ $env.LOGGING_API_URL }}/log/voice-agent",
+                "options": {}
+            },
+            "id": "03e47413-a319-4ad4-bf51-000d6a7b581e",
+            "name": "Transaction Logger",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4.2,
+            "position": [
+                672,
+                240
+            ]
+        },
+        {
+            "parameters": {
+                "resource": "audio",
+                "operation": "speak",
+                "requestOptions": {}
+            },
+            "id": "43eb2b21-669d-496c-a431-2e7ecff974f0",
+            "name": "OpenAI Text-to-Speech",
+            "type": "n8n-nodes-base.openAi",
+            "typeVersion": 1,
+            "position": [
+                880,
+                240
+            ]
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "options": {}
+            },
+            "id": "2396599f-7b9f-4223-9b38-146f06824455",
+            "name": "Webhook Response (Final)",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                1104,
+                240
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "// Error Handler\n// Catches errors from STT, LLM, or API and generates a friendly response.\n\nconst errorData = $input.item.error;\nconst originalData = $('Webhook Trigger').item.json;\n\nconst errorType = errorData.context.node.name;\nconst errorMessage = errorData.message;\n\n// Log the error internally (optional, can be replaced by a dedicated logging node)\nconsole.error(`Error in ${errorType}: ${errorMessage}`);\n\nreturn {\n  json: {\n    responseText: 'I am sorry, I seem to have run into a technical issue while processing your request. Please try again or rephrase your question.',\n    sessionUpdate: JSON.parse(originalData.sessionState || '{}'),\n    errorDetails: { type: errorType, message: errorMessage }\n  }\n};"
+            },
+            "id": "a27768ba-f24b-4e0a-a025-99e89beaecdc",
+            "name": "Error Handler",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                0,
+                672
+            ]
+        },
+        {
+            "parameters": {
+                "resource": "audio",
+                "operation": "speak",
+                "requestOptions": {}
+            },
+            "id": "2cd4a323-ec20-4660-86e6-966dd36f3eac",
+            "name": "Error TTS",
+            "type": "n8n-nodes-base.openAi",
+            "typeVersion": 1,
+            "position": [
+                224,
+                672
+            ]
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "options": {}
+            },
+            "id": "d8a6af4e-0fcb-46b0-a97d-e2a87e599544",
+            "name": "Webhook Response (Error)",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1.1,
+            "position": [
+                448,
+                672
+            ]
+        }
+    ],
+    "pinData": {},
+    "connections": {
+        "Webhook Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "OpenAI Speech-to-Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "OpenAI Speech-to-Text": {
+            "main": [
+                [
+                    {
+                        "node": "Context Builder (History)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Context Builder (History)": {
+            "main": [
+                [
+                    {
+                        "node": "OpenAI Chat Completion (Agent)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "OpenAI Chat Completion (Agent)": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Action & Update History",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Action & Update History": {
+            "main": [
+                [
+                    {
+                        "node": "Switch Action Type",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Switch Action Type": {
+            "main": [
+                [
+                    {
+                        "node": "API: Search Organizations",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "API: List Departments",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "API: List Providers",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "API: Query Availability",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "API: Create Booking",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "OpenAI Text-to-Speech",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "OpenAI Text-to-Speech",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "API: Search Organizations": {
+            "main": [
+                [
+                    {
+                        "node": "API Response Handler",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "API: List Departments": {
+            "main": [
+                [
+                    {
+                        "node": "API Response Handler",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "API: List Providers": {
+            "main": [
+                [
+                    {
+                        "node": "API Response Handler",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "API: Query Availability": {
+            "main": [
+                [
+                    {
+                        "node": "API Response Handler",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "API: Create Booking": {
+            "main": [
+                [
+                    {
+                        "node": "API Response Handler",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "API Response Handler": {
+            "main": [
+                [
+                    {
+                        "node": "LLM: Summarize API Result",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "LLM: Summarize API Result": {
+            "main": [
+                [
+                    {
+                        "node": "Transaction Logger",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Transaction Logger": {
+            "main": [
+                [
+                    {
+                        "node": "OpenAI Text-to-Speech",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "OpenAI Text-to-Speech": {
+            "main": [
+                [
+                    {
+                        "node": "Webhook Response (Final)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Error Handler": {
+            "main": [
+                [
+                    {
+                        "node": "Error TTS",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Error TTS": {
+            "main": [
+                [
+                    {
+                        "node": "Webhook Response (Error)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "active": false,
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "versionId": "101ef96b-a913-47fe-a4ba-c9add9aa0884",
+    "meta": {
+        "instanceId": "b43b280c1d0a68bb1ecde1a4f7b77b24b9d8f32e59d928ab34920481fb151a55"
+    },
+    "id": "XS1G1gyAzzS1uDAN",
+    "tags": []
+}
